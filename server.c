@@ -88,14 +88,57 @@ int main(int argc, char** argv) {
     // Loop for handling connections
     fprintf(stderr, "\nstarting on %.80s, port %d, fd %d, maxconn %d...\n", svr.hostname, svr.port, svr.listen_fd, maxfd);
 
-    fd_set readset, writeset;
+    int mine_max_fd = svr.listen_fd, result;
+    fd_set the_set, temp_set;
+    FD_ZERO(&the_set);
+    FD_SET(svr.listen_fd, &the_set);
+    while (1) {
+        memcpy(&temp_set, &the_set, sizeof(temp_set));
+        clilen = sizeof(cliaddr);
+        result = select(mine_max_fd+1, &temp_set, NULL, NULL, NULL);
+        if (result > 0) {
+            if (FD_ISSET(svr.listen_fd, &temp_set)) {
+                printf("Someone connected!\n");
+                conn_fd = accept(svr.listen_fd, (struct sockaddr*)&cliaddr, (socklen_t*)&clilen);
+                if (conn_fd < 0) {
+                    fprintf(stderr, "error in accept\n");
+                    continue;
+                }
+                requestP[conn_fd].conn_fd = conn_fd;
+                strcpy(requestP[conn_fd].host, inet_ntoa(cliaddr.sin_addr));
+                fprintf(stderr, "getting a new request... fd %d from %s\n", conn_fd, requestP[conn_fd].host);
+                FD_SET(conn_fd, &the_set);
+                mine_max_fd = (mine_max_fd < conn_fd) ? conn_fd : mine_max_fd;
+                continue;
+            }
+            for (i = 0; i < maxfd; i++) {
+                if (requestP[i].conn_fd != -1) {
+                    if (FD_ISSET(requestP[i].conn_fd, &temp_set)) {
+                        ret = handle_read(&requestP[i]); // parse data from client to requestP[conn_fd].buf
+                        if (ret < 0) {
+                            fprintf(stderr, "bad request from %s\n", requestP[i].host);
+                            continue;
+                        }
+                        sprintf(buf,"%s : %s\n",accept_read_header,requestP[i].buf);
+                        write(requestP[i].conn_fd, buf, strlen(buf));
+		                close(requestP[i].conn_fd);
+		                free_request(&requestP[i]);
+                        FD_CLR(i, &the_set);
+                    }
+                }
+            }
+        }
+    }
+    /*
     while (1) {
         // TODO: Add IO multiplexing
         // Check new connection
         clilen = sizeof(cliaddr);
         conn_fd = accept(svr.listen_fd, (struct sockaddr*)&cliaddr, (socklen_t*)&clilen);
         if (conn_fd < 0) {
-            if (errno == EINTR || errno == EAGAIN) continue;  // try again
+            if (errno == EINTR || errno == EAGAIN) {
+                continue;  // try again
+            }
             if (errno == ENFILE) {
                 (void) fprintf(stderr, "out of file descriptor table ... (maxconn %d)\n", maxfd);
                 continue;
@@ -105,10 +148,22 @@ int main(int argc, char** argv) {
         requestP[conn_fd].conn_fd = conn_fd;
         strcpy(requestP[conn_fd].host, inet_ntoa(cliaddr.sin_addr));
         fprintf(stderr, "getting a new request... fd %d from %s\n", conn_fd, requestP[conn_fd].host);
-
-        #ifdef READ_SERVER
-        
-        #endif
+        int result = -1, max = 65536;
+        while (result <= 0) {
+            FD_ZERO(&the_set);
+            for (i = 0; i < maxfd; i++) {
+                if (requestP[i] != NULL) {
+                    FD_SET(requestP[i].conn_fd, &the_set);
+                    if (requestP[i].conn_fd > max)
+                        max = requestP[i].conn_fd;
+                }
+            }
+            #ifdef READ_SERVER
+            result = select(max+1, &the_set, NULL, NULL, NULL);
+            #else
+            result = select(max+1, NULL, &the_set, NULL, NULL);
+            #endif
+        }
 		ret = handle_read(&requestP[conn_fd]); // parse data from client to requestP[conn_fd].buf
 		if (ret < 0) {
 			fprintf(stderr, "bad request from %s\n", requestP[conn_fd].host);
@@ -126,6 +181,7 @@ int main(int argc, char** argv) {
 		close(requestP[conn_fd].conn_fd);
 		free_request(&requestP[conn_fd]);
     }
+    */
     free(requestP);
     return 0;
 }
