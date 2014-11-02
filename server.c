@@ -12,6 +12,11 @@
 #define ERR_EXIT(a) { perror(a); exit(1); }
 
 typedef struct {
+    int id;
+    int money;
+} Account;
+
+typedef struct {
     char hostname[512];  // server's hostname
     unsigned short port;  // port to listen
     int listen_fd;  // fd to wait for a new connection
@@ -54,7 +59,7 @@ static int handle_read(request* reqP);
 // -1: client connection error
 
 int main(int argc, char** argv) {
-    int i, ret;
+    int i, ret, j;
 
     struct sockaddr_in cliaddr;  // used by accept()
     int clilen;
@@ -88,8 +93,9 @@ int main(int argc, char** argv) {
     // Loop for handling connections
     fprintf(stderr, "\nstarting on %.80s, port %d, fd %d, maxconn %d...\n", svr.hostname, svr.port, svr.listen_fd, maxfd);
 
+    int fd = open("account_info", O_RDWR|O_CREAT);
     int mine_max_fd = svr.listen_fd, result;
-    fd_set the_set, temp_set;
+    fd_set the_set, temp_set, write_set;
     FD_ZERO(&the_set);
     FD_SET(svr.listen_fd, &the_set);
     while (1) {
@@ -98,7 +104,6 @@ int main(int argc, char** argv) {
         result = select(mine_max_fd+1, &temp_set, NULL, NULL, NULL);
         if (result > 0) {
             if (FD_ISSET(svr.listen_fd, &temp_set)) {
-                printf("Someone connected!\n");
                 conn_fd = accept(svr.listen_fd, (struct sockaddr*)&cliaddr, (socklen_t*)&clilen);
                 if (conn_fd < 0) {
                     fprintf(stderr, "error in accept\n");
@@ -119,69 +124,129 @@ int main(int argc, char** argv) {
                             fprintf(stderr, "bad request from %s\n", requestP[i].host);
                             continue;
                         }
-                        sprintf(buf,"%s : %s\n",accept_read_header,requestP[i].buf);
-                        write(requestP[i].conn_fd, buf, strlen(buf));
+                    //    sprintf(buf,"%s : %s\n",accept_read_header,requestP[i].buf);
+                    //    write(requestP[i].conn_fd, buf, strlen(buf));
+                        #ifdef READ_SERVER
+                        char *end;
+                        int acc = (int)strtol(requestP[i].buf, &end, 10);
+                        if (*end != 0) {
+                            sprintf(buf,"please enter account number only! : %s\n", requestP[i].buf);
+                            write(requestP[i].conn_fd, buf, strlen(buf));
+                            continue;
+                        }
+                        struct flock lock;
+                        memset(&lock, 0, sizeof(lock));
+                        lock.l_type     = F_RDLCK;
+                        lock.l_whence   = SEEK_SET;
+                        lock.l_start    = acc*sizeof(Account);
+                        lock.l_len      = sizeof(Account);
+
+                        int test = fcntl(fd, F_SETLK, &lock);
+                        if (test < 0) {
+                            sprintf(buf, "This account is occupied.\n");
+                            write(requestP[i].conn_fd, buf, strlen(buf));
+                        } else {
+                            Account temp;
+                            lseek(fd, acc*sizeof(Account), SEEK_SET);
+                            int bytes = read(fd, &temp, sizeof(Account));
+                            if (bytes > 0) {
+                                sprintf(buf, "Balance: %d\n", temp.money);
+                                write(requestP[i].conn_fd, buf, strlen(buf));
+                            }
+                            lock.l_type = F_UNLCK;
+                            fcntl(fd, F_SETLK, &lock);
+                        }
+//                        close(fd);
+
+                        #else
+
+                        if (requestP[i].buf[0] == '+' || requestP[i].buf[0] == '-') {
+                            char *end;
+                            int value = (int)strtol(requestP[i].buf, &end, 10);
+                            /*
+                            if (*end != 0) {
+                                sprintf(buf,"please enter account number only! : %s\n", requestP[i].buf);
+                                write(requestP[i].conn_fd, buf, strlen(buf));
+                                continue;
+                            }
+                            */
+//                            int fd = open("account_info", O_RDWR|O_CREAT);
+                            int acc = requestP[i].account;
+                            Account temp;
+                            lseek(fd, acc*sizeof(Account), SEEK_SET);
+                            int bytes = read(fd, &temp, sizeof(Account));
+                            if (bytes > 0) {
+                                /*
+                                sprintf(buf, "Balance: %d\n", temp.money);
+                                write(requestP[i].conn_fd, buf, strlen(buf));
+                                */
+                                if (temp.money + value < 0) {
+                                    sprintf(buf, "Operation fail.\n");
+                                    write(requestP[i].conn_fd, buf, strlen(buf));
+                                } else {
+                                    // write new value into the file.
+                                    temp.money = temp.money + value;
+                                    lseek(fd, acc*sizeof(Account), SEEK_SET);
+                                    write(fd, &temp, sizeof(Account));
+                                }
+                            }
+
+                            struct flock lock;
+                            memset(&lock, 0, sizeof(lock));
+                            lock.l_type = F_UNLCK;
+                            fcntl(fd, F_SETLK, &lock);
+//                            close(fd);
+                        } else {
+                            char *end;
+                            int acc = (int)strtol(requestP[i].buf, &end, 10);
+                            /*
+                            if (*end != 0) {
+                                sprintf(buf,"please enter account number only! : %s\n", requestP[i].buf);
+                                write(requestP[i].conn_fd, buf, strlen(buf));
+                                continue;
+                            }
+                            */
+//                            int fd = open("account_info", O_RDWR|O_CREAT);
+                            requestP[i].account = acc;
+
+                            // set the lock
+                            struct flock lock;
+                            memset(&lock, 0, sizeof(lock));
+                            lock.l_type     = F_WRLCK;
+                            lock.l_whence   = SEEK_SET;
+                            lock.l_start    = acc*sizeof(Account);
+                            lock.l_len      = sizeof(Account);
+
+                            int test = fcntl(fd, F_SETLK, &lock);
+                            if (test < 0) {
+                                sprintf(buf, "This account is occupied.\n");
+                                write(requestP[i].conn_fd, buf, strlen(buf));
+                            } else {
+                                int occupied_in = 0;
+                                for (j = 0; j < maxfd; j++)
+                                    if (i != j && requestP[j].account == requestP[i].account)
+                                        occupied_in = 1;
+                                if (!occupied_in) {
+                                    sprintf(buf, "This account is available.\n");
+                                    write(requestP[i].conn_fd, buf, strlen(buf));
+                                    continue;
+                                } else {
+                                    sprintf(buf, "This account is occupied.\n");
+                                    write(requestP[i].conn_fd, buf, strlen(buf));
+                                }
+                            }
+                        }
+                        #endif
+
 		                close(requestP[i].conn_fd);
 		                free_request(&requestP[i]);
                         FD_CLR(i, &the_set);
-                    }
-                }
-            }
-        }
+                    } // if (FD_ISSET(....
+                } // if (requestP[i].conn_fd != -1) {
+            } // for (i = 0; i < maxfd; i++) {
+        } // if result > 0..
     }
-    /*
-    while (1) {
-        // TODO: Add IO multiplexing
-        // Check new connection
-        clilen = sizeof(cliaddr);
-        conn_fd = accept(svr.listen_fd, (struct sockaddr*)&cliaddr, (socklen_t*)&clilen);
-        if (conn_fd < 0) {
-            if (errno == EINTR || errno == EAGAIN) {
-                continue;  // try again
-            }
-            if (errno == ENFILE) {
-                (void) fprintf(stderr, "out of file descriptor table ... (maxconn %d)\n", maxfd);
-                continue;
-            }
-            ERR_EXIT("accept")
-        }
-        requestP[conn_fd].conn_fd = conn_fd;
-        strcpy(requestP[conn_fd].host, inet_ntoa(cliaddr.sin_addr));
-        fprintf(stderr, "getting a new request... fd %d from %s\n", conn_fd, requestP[conn_fd].host);
-        int result = -1, max = 65536;
-        while (result <= 0) {
-            FD_ZERO(&the_set);
-            for (i = 0; i < maxfd; i++) {
-                if (requestP[i] != NULL) {
-                    FD_SET(requestP[i].conn_fd, &the_set);
-                    if (requestP[i].conn_fd > max)
-                        max = requestP[i].conn_fd;
-                }
-            }
-            #ifdef READ_SERVER
-            result = select(max+1, &the_set, NULL, NULL, NULL);
-            #else
-            result = select(max+1, NULL, &the_set, NULL, NULL);
-            #endif
-        }
-		ret = handle_read(&requestP[conn_fd]); // parse data from client to requestP[conn_fd].buf
-		if (ret < 0) {
-			fprintf(stderr, "bad request from %s\n", requestP[conn_fd].host);
-			continue;
-		}
-
-#ifdef READ_SERVER
-		sprintf(buf,"%s : %s\n",accept_read_header,requestP[conn_fd].buf);
-		write(requestP[conn_fd].conn_fd, buf, strlen(buf));
-#else
-		sprintf(buf,"%s : %s\n",accept_write_header,requestP[conn_fd].buf);
-		write(requestP[conn_fd].conn_fd, buf, strlen(buf));
-#endif
-
-		close(requestP[conn_fd].conn_fd);
-		free_request(&requestP[conn_fd]);
-    }
-    */
+    close(fd);
     free(requestP);
     return 0;
 }
@@ -197,7 +262,7 @@ static void* e_malloc(size_t size);
 static void init_request(request* reqP) {
     reqP->conn_fd = -1;
     reqP->buf_len = 0;
-    reqP->account = 0;
+    reqP->account = -1;
     reqP->wait_for_write = 0;
 }
 
